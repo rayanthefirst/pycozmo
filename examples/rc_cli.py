@@ -1,28 +1,23 @@
 #!/usr/bin/env python
 """Simple command line RC controller for Cozmo.
 
-This example combines driving, camera streaming and text-to-speech.
-It requires ``opencv-python``, ``gTTS`` and ``pydub`` for the TTS feature.
+This example combines driving and camera streaming.
 
 Controls:
     w - forward
     s - backward
     a - turn left
     d - turn right
+    r - raise head
+    f - lower head
+    t - raise lift
+    g - lower lift
     space - stop motors
     ESC - exit
-
-Type text in the terminal and press Enter for the robot to speak it.
 """
-
-import threading
-import tempfile
-import os
 
 import cv2
 import numpy as np
-from gtts import gTTS
-from pydub import AudioSegment
 
 import pycozmo
 
@@ -36,50 +31,22 @@ def on_camera_image(cli, image):
     last_frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
-def say_text(cli, text: str) -> None:
-    """Generate speech for ``text`` and play it on the robot."""
-    tts = gTTS(text=text, lang="en")
-    tmp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-    tts.save(tmp_mp3.name)
-    sound = AudioSegment.from_mp3(tmp_mp3.name)
-    tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    sound.set_frame_rate(22050).set_channels(1).export(
-        tmp_wav.name, format="wav")
-    cli.play_audio(tmp_wav.name)
-    cli.wait_for(pycozmo.event.EvtAudioCompleted)
-    os.unlink(tmp_mp3.name)
-    os.unlink(tmp_wav.name)
-
-
-def input_loop(cli):
-    """Read text from the user and speak it."""
-    while True:
-        try:
-            text = input("Say> ")
-        except EOFError:
-            break
-        if text:
-            try:
-                say_text(cli, text)
-            except Exception as exc:
-                print("Failed to speak:", exc)
-
-
 def main():
     with pycozmo.connect(enable_procedural_face=False) as cli:
         # Raise head a bit to see ahead.
         angle = (pycozmo.robot.MAX_HEAD_ANGLE.radians -
                  pycozmo.robot.MIN_HEAD_ANGLE.radians) / 2.0
         cli.set_head_angle(angle)
+        head_angle = angle
+        lift_height = cli.lift_position.height.mm
 
         # Enable camera and register handler.
         cli.enable_camera(enable=True, color=True)
         cli.add_handler(pycozmo.event.EvtNewRawCameraImage, on_camera_image)
 
-        # Start text input thread.
-        threading.Thread(target=input_loop, args=(cli,), daemon=True).start()
-
         speed = 100  # mm/s
+        head_step = 0.1  # radians
+        lift_step = 5.0  # mm
         while True:
             if last_frame is not None:
                 cv2.imshow("Cozmo", last_frame)
@@ -94,6 +61,22 @@ def main():
                 cli.drive_wheels(-speed, speed)
             elif key == ord('d'):
                 cli.drive_wheels(speed, -speed)
+            elif key == ord('r'):
+                head_angle = min(head_angle + head_step,
+                                 pycozmo.robot.MAX_HEAD_ANGLE.radians)
+                cli.set_head_angle(head_angle)
+            elif key == ord('f'):
+                head_angle = max(head_angle - head_step,
+                                 pycozmo.robot.MIN_HEAD_ANGLE.radians)
+                cli.set_head_angle(head_angle)
+            elif key == ord('t'):
+                lift_height = min(lift_height + lift_step,
+                                  pycozmo.robot.MAX_LIFT_HEIGHT.mm)
+                cli.set_lift_height(lift_height)
+            elif key == ord('g'):
+                lift_height = max(lift_height - lift_step,
+                                  pycozmo.robot.MIN_LIFT_HEIGHT.mm)
+                cli.set_lift_height(lift_height)
             elif key == ord(' '):
                 cli.stop_all_motors()
 
