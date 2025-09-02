@@ -3,4 +3,5 @@ dpkt
 numpy
 Pillow>=6.0.0
 flatbuffers
-Flask>=2.0
+fastapi>=0.110
+uvicorn[standard]>=0.22

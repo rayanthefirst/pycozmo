@@ -10,13 +10,14 @@ Paths
 Install
 - Python 3.8+
 - Install deps: `pip install -r requirements.txt`
-  - Adds Flask for the web server
+  - Adds FastAPI + Uvicorn for the web server
 
 Run
 - Connect Cozmo’s charger to your computer as usual
 - Start the server:
   - `python examples/rc_web.py --host 0.0.0.0 --port 8080`
   - Optional: `--color` enables color camera (if supported)
+  - Alternatively with uvicorn: `uvicorn examples.rc_web:app --host 0.0.0.0 --port 8080`
 - From your phone/laptop on the same network, open: `http://<PC_IP>:8080`
   - Tip: find `<PC_IP>` via `ipconfig` (Windows) or `ifconfig` (macOS/Linux)
   - Allow the app through your firewall if prompted
@@ -40,4 +41,3 @@ Notes
 - The server keeps a persistent pycozmo connection and enables the camera at startup.
 - The MJPEG stream is efficient and works in most browsers. If you need WebSocket or HLS, we can extend it.
 - If nothing appears, ensure the robot is connected and your firewall allows inbound connections on the chosen port.
-

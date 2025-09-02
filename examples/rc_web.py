@@ -12,7 +12,7 @@ Usage:
 Then open http://<your-ip>:8080 from another device on the network.
 
 Dependencies:
-    pip install flask
+    pip install fastapi uvicorn[standard]
 """
 
 import argparse
@@ -21,24 +21,27 @@ import threading
 import time
 from typing import Optional
 
-from flask import Flask, Response, jsonify, request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import uvicorn
 
 import pycozmo
 
 
-app = Flask(__name__)
+app = FastAPI(title="Cozmo RC Web")
 
 
 class RobotController:
     """Manage pycozmo client connection and expose control helpers."""
 
-    def __init__(self, color_camera: bool = True):
+    def __init__(self, color_camera: bool = True, jpeg_quality: int = 70):
         self.cli: Optional[pycozmo.Client] = None
         self._lock = threading.RLock()
         self._connected = False
         self._head_angle = None
         self._lift_height = None
         self._color_camera = color_camera
+        self._jpeg_quality = max(1, min(95, int(jpeg_quality)))
 
         # Camera state
         self._last_jpeg = None  # bytes
@@ -54,7 +57,8 @@ class RobotController:
         # image is a PIL.Image object. Encode to JPEG bytes.
         try:
             bio = io.BytesIO()
-            image.save(bio, format="JPEG", quality=80)
+            # Lower quality reduces bytes-on-the-wire which helps latency
+            image.save(bio, format="JPEG", quality=self._jpeg_quality)
             data = bio.getvalue()
         except Exception:
             return
@@ -173,10 +177,9 @@ class RobotController:
 controller = RobotController(color_camera=True)
 
 
-@app.route("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
-    return (
-        """
+    return """
 <!doctype html>
 <html lang="en">
   <head>
@@ -235,25 +238,31 @@ def index():
     </script>
   </body>
 </html>
-        """
-    )
+    """
 
 
-@app.route("/api/status")
+@app.get("/api/status")
 def api_status():
-    return jsonify({
+    return {
         "connected": True,
         "speed_mmps": controller.speed_mmps,
         "head_step_rad": controller.head_step_rad,
         "lift_step_mm": controller.lift_step_mm,
-    })
+    }
 
 
-@app.route("/api/drive", methods=["POST"])
-def api_drive():
-    data = request.get_json(silent=True) or {}
-    action = (data.get("action") or "").lower()
-    speed = int(data.get("speed") or controller.speed_mmps)
+@app.post("/api/drive")
+async def api_drive(request: Request):
+    data = {}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    action = str(data.get("action") or "").lower()
+    try:
+        speed = int(data.get("speed") if data.get("speed") is not None else controller.speed_mmps)
+    except Exception:
+        speed = controller.speed_mmps
     controller.speed_mmps = max(0, min(250, speed))
 
     if action == "forward":
@@ -265,43 +274,49 @@ def api_drive():
     elif action == "right":
         controller.drive(controller.speed_mmps, -controller.speed_mmps)
     else:
-        return jsonify({"ok": False, "error": "invalid action"}), 400
-    return jsonify({"ok": True})
+        raise HTTPException(status_code=400, detail="invalid action")
+    return {"ok": True}
 
 
-@app.route("/api/head", methods=["POST"])
-def api_head():
-    data = request.get_json(silent=True) or {}
-    direction = (data.get("dir") or "").lower()
+@app.post("/api/head")
+async def api_head(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    direction = str(data.get("dir") or "").lower()
     if direction == "up":
         controller.head_up()
     elif direction == "down":
         controller.head_down()
     else:
-        return jsonify({"ok": False, "error": "invalid dir"}), 400
-    return jsonify({"ok": True})
+        raise HTTPException(status_code=400, detail="invalid dir")
+    return {"ok": True}
 
 
-@app.route("/api/lift", methods=["POST"])
-def api_lift():
-    data = request.get_json(silent=True) or {}
-    direction = (data.get("dir") or "").lower()
+@app.post("/api/lift")
+async def api_lift(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    direction = str(data.get("dir") or "").lower()
     if direction == "up":
         controller.lift_up()
     elif direction == "down":
         controller.lift_down()
     else:
-        return jsonify({"ok": False, "error": "invalid dir"}), 400
-    return jsonify({"ok": True})
+        raise HTTPException(status_code=400, detail="invalid dir")
+    return {"ok": True}
 
 
-@app.route("/api/stop", methods=["POST", "GET"])
+@app.api_route("/api/stop", methods=["POST", "GET"])
 def api_stop():
     controller.stop()
-    return jsonify({"ok": True})
+    return {"ok": True}
 
 
-@app.route("/stream")
+@app.get("/stream")
 def stream():
     boundary = "frame"
 
@@ -312,18 +327,41 @@ def stream():
             frame = controller.get_last_jpeg()
             if frame and (len(frame) != last_sent):
                 last_sent = len(frame)
-                yield (
-                    b"--" + boundary.encode() + b"\r\n"
-                    + b"Content-Type: image/jpeg\r\n"
-                    + f"Content-Length: {len(frame)}\r\n\r\n".encode()
-                    + frame
-                    + b"\r\n"
-                )
+                # Send boundary and headers in a small chunk to encourage flush
+                yield b"--" + boundary.encode() + b"\r\n"
+                yield b"Content-Type: image/jpeg\r\n\r\n"
+                # Send payload separately to avoid proxy buffering of large combined chunks
+                yield frame
+                yield b"\r\n"
             else:
                 # Avoid busy loop
                 time.sleep(0.03)
 
-    return Response(gen(), mimetype=f"multipart/x-mixed-replace; boundary={boundary}")
+    headers = {
+        # Strongly discourage any caching or transformation on the path
+        "Cache-Control": "no-cache, no-store, must-revalidate, private",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        # Honored by some reverse proxies (e.g., nginx). Harmless elsewhere.
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(
+        gen(),
+        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers=headers,
+    )
+
+
+# Lifecycle hooks so the app works when started via `uvicorn examples.rc_web:app` as well
+@app.on_event("startup")
+def _on_startup():
+    controller.connect()
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    controller.disconnect()
 
 
 def main():
@@ -331,17 +369,20 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     parser.add_argument("--color", action="store_true", help="Enable color camera")
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=70,
+        help="JPEG quality (1-95). Lower = smaller frames (default: 70)",
+    )
     args = parser.parse_args()
 
     controller._color_camera = bool(args.color)
-    controller.connect()
+    controller._jpeg_quality = max(1, min(95, int(args.jpeg_quality)))
 
-    try:
-        app.run(host=args.host, port=args.port, threaded=True, debug=False)
-    finally:
-        controller.disconnect()
+    # If executed directly, run with uvicorn
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
     main()
-
