@@ -14,6 +14,12 @@ Then open http://<your-ip>:8080 from another device on the network.
 Dependencies:
     pip install fastapi uvicorn[standard]
 """
+import sys
+from pathlib import Path
+
+if __package__ is None:
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 
 import argparse
 import io
